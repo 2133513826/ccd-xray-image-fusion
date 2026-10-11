@@ -1,0 +1,9 @@
+/build/
+/data/
+/results/
+
+# Raw test images stay local.
+/tests/**/*.tiff
+/tests/**/*.tif
+/tests/**/*.jpg
+/tests/**/*.png

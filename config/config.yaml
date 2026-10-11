@@ -1,0 +1,36 @@
+%YAML:1.0
+---
+paths:
+  ccd_dir: "../data/raw/ccd/2025-11-28/heigan"
+  #ccd_dir: "../tests/104test"
+  output_dir: "../results"
+  x_high_dir: "../data/raw/X/2025-11-28/heigan/High"
+
+ccd_preprocess:
+  
+  invalid_depth: -32768.0
+  valid_ratio: 0.80
+  depth_diff: 12.0
+  intensity_diff: 20.0
+  morph_kernel: 3
+  min_area: 1000
+  edge_margin: 3
+  padding_pixels: 5
+
+x_preprocess:
+  frame_interval_ms: 185
+  time_tolerance_ms: 5
+
+  foreground_threshold: 2500
+  morph_kernel: 3
+  min_area: 300
+
+  edge_margin: 3
+  padding_pixels: 5
+
+  valid_x_begin: 70
+  valid_x_end: 870
+    # 横向区间交集长度 / 并集长度，取值范围为(0, 1]。
+  min_horizontal_iou: 0.5
+  core_threshold: 5000
+  min_core_pixels: 20
