@@ -11,9 +11,9 @@ ccd_preprocess:
   invalid_depth: -32768.0
   valid_ratio: 0.80
   depth_diff: 12.0
-  intensity_diff: 20.0
+  intensity_diff: 25.0
   morph_kernel: 3
-  min_area: 1000
+  min_area: 250
   edge_margin: 3
   padding_pixels: 5
 

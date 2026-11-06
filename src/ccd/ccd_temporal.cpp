@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -829,194 +830,186 @@ CcdObjectCrop concatenateCcdObjects(
     return result;
 }
 
+namespace {
+
+struct CcdRecoveryFrame {
+    std::vector<CcdObjectCrop> objects;
+    std::vector<bool> used;
+};
+
+// 回查只恢复普通面积过滤删掉的边界片段，不重新使用原列表的大目标。
+CcdRecoveryFrame reprocessCcdBoundaryFrame(
+    std::size_t file_index,
+    const CcdPair& pair,
+    const CcdBackground& background,
+    const CcdOptions& options
+) {
+    CcdOptions recovery_options = options;
+    recovery_options.min_area = 1;
+    const cv::Mat mask = detectCcd(
+        pair.depth_image, pair.intensity_image, background, recovery_options);
+
+    cv::Mat labels, stats, centers;
+    const int count = cv::connectedComponentsWithStats(
+        mask, labels, stats, centers, 8, CV_32S);
+    cv::Mat candidates = cv::Mat::zeros(mask.size(), CV_8UC1);
+    for (int label = 1; label < count; ++label) {
+        const int area = stats.at<int>(label, cv::CC_STAT_AREA);
+        if (area >= options.min_area) continue;
+        const int top = stats.at<int>(label, cv::CC_STAT_TOP);
+        const int bottom = top + stats.at<int>(label, cv::CC_STAT_HEIGHT);
+        const bool top_near = top <= options.edge_margin;
+        const bool bottom_near = bottom >= mask.rows - options.edge_margin;
+        // 内部小噪声和贯穿上下边界的歧义区域都不进入回查候选。
+        if (top_near == bottom_near) continue;
+        candidates.setTo(255, labels == label);
+    }
+
+    const auto frame = analyzeCcdMask(
+        file_index, parseCcdTimestampMs(pair.id), candidates, options.edge_margin);
+    CcdRecoveryFrame result;
+    result.objects = cropCcdObjects(pair, frame, candidates, options.padding_pixels);
+    result.used.resize(result.objects.size(), false);
+    return result;
+}
+
+} // namespace
+
 CcdTemporalResult processCcdTemporalObjects(
     const std::vector<CcdObjectCrop>& all_objects,
+    const std::vector<CcdPair>& pairs,
+    const CcdBackground& background,
+    const CcdOptions& ccd_options,
     const CcdTemporalOptions& options
 ) {
     CcdTemporalResult result;
-
-    // used[i]表示第i个物体是否已经被处理。
-    // 跨帧融合后，需要将前后两个物体都标记为已处理，
-    // 防止它们再次作为独立物体输出。
-    std::vector<bool> used(all_objects.size(), false);
-
+    if (ccd_options.min_area <= 0) {
+        throw std::invalid_argument("CCD min_area must be positive");
+    }
     for (std::size_t i = 0; i < all_objects.size(); ++i) {
-        // The first i entries have been visited, including already-used objects.
-        showProgress("CCD temporal", i, all_objects.size());
-        // 该物体已经参加过跨帧融合，直接跳过。
-        if (used[i]) {
-            continue;
+        const auto file_index = all_objects[i].object_info.file_index;
+        if (file_index == 0 || file_index > pairs.size() ||
+            (i > 0 && file_index < all_objects[i - 1].object_info.file_index)) {
+            throw std::invalid_argument("CCD objects must be ordered by valid frame indices");
         }
-
-        const CcdObjectCrop& previous = all_objects[i];
-        const CcdObjectInfo& previous_info =
-            previous.object_info;
-
-        // 情况一：物体位于图像内部。
-        // 可以认为当前帧已经完整拍摄该物体，直接输出。
-        if (previous_info.position ==
-            CcdObjectPosition::Interior) {
-            result.final_ccd_objects.push_back(previous);
-            used[i] = true;
-            continue;
-        }
-
-        // 情况二：物体位于上边界。
-        // 按照当前处理规则，它应该已经有机会被前一帧的
-        // BottomBoundary物体匹配。
-        // 如果运行到这里仍未被使用，说明没有找到前一帧对象，
-        // 因此将它作为独立物体保留。
-        if (previous_info.position ==
-            CcdObjectPosition::TopBoundary) {
-            result.final_ccd_objects.push_back(previous);
-            used[i] = true;
-            continue;
-        }
-
-        // 只有下边界物体才需要向后一帧寻找对应目标。
-        if (previous_info.position !=
-            CcdObjectPosition::BottomBoundary) {
-            result.final_ccd_objects.push_back(previous);
-            used[i] = true;
-            continue;
-        }
-
-        // 保存找到的最佳候选物体下标。
-        std::size_t best_candidate_index =
-            all_objects.size();
-
-        // 当前先使用横向重叠率选择最佳候选。
-        double best_horizontal_overlap = -1.0;
-
-        // 在后面的物体中寻找下一帧的上边界物体。
-        for (std::size_t j = i + 1;
-             j < all_objects.size();
-             ++j) {
-            if (used[j]) {
-                continue;
-            }
-
-            const CcdObjectCrop& current = all_objects[j];
-            const CcdObjectInfo& current_info =
-                current.object_info;
-
-            // 还没有到下一帧，则继续寻找。
-            if (current_info.file_index <=
-                previous_info.file_index) {
-                continue;
-            }
-
-            // 已经超过下一帧，后面不可能再出现合适候选。
-            if (current_info.file_index >
-                previous_info.file_index + 1) {
-                break;
-            }
-
-            // 统一使用已经写好的候选判断函数检查：
-            // 1. 前一物体是否位于下边界；
-            // 2. 后一物体是否位于上边界；
-            // 3. 是否来自相邻帧；
-            // 4. 时间差是否合理；
-            // 5. 横向重叠率是否达到要求。
-            if (!isCrossFrameCandidate(
-                    previous,
-                    current,
-                    options)) {
-                continue;
-            }
-
-            const double horizontal_overlap =
-                calculateHorizontalOverlap(
-                    previous_info.bounding_rect,
-                    current_info.bounding_rect
-                );
-
-            // 如果下一帧中有多个候选物体，
-            // 选择横向重叠程度最高的一个。
-            if (horizontal_overlap >
-                best_horizontal_overlap) {
-                best_horizontal_overlap =
-                    horizontal_overlap;
-                best_candidate_index = j;
-            }
-        }
-
-        // 没有找到下一帧候选目标。
-        // 当前下边界物体只能作为独立目标保留。
-        if (best_candidate_index ==
-            all_objects.size()) {
-            result.final_ccd_objects.push_back(previous);
-            used[i] = true;
-            continue;
-        }
-
-        const CcdObjectCrop& current =
-            all_objects[best_candidate_index];
-
-        // 遍历不同的重叠行数，判断两部分之间是否存在冗余，
-        // 同时得到最佳重叠行数和每个n对应的评分。
-        CcdFusionDecision decision =
-            estimateCcdFusion(
-                previous,
-                current,
-                options
-            );
-
-        CcdObjectCrop merged_object;
-
-        if (decision.mode ==
-            CcdFusionMode::RedundancyFusion) {
-            // 检测到可靠的冗余区域，进行羽化融合。
-            merged_object =
-                fuseCcdRedundantRegion(
-                    previous,
-                    current,
-                    decision.best_overlap_rows,
-                    options
-                );
-        } else {
-            // 没有检测到可靠冗余，直接上下拼接。
-            merged_object =
-                concatenateCcdObjects(
-                    previous,
-                    current,
-                    options
-                );
-        }
-
-        // 记录两个原始物体之间的匹配关系。
-        CcdCrossFrameMatch match;
-        match.previous_index = i;
-        match.current_index = best_candidate_index;
-
-        match.time_gap_ms =
-            current.object_info.timestamp_ms -
-            previous.object_info.timestamp_ms;
-
-        match.horizontal_overlap =
-            best_horizontal_overlap;
-
-        // 保存用于展示和评价算法的详细融合记录。
-        CcdObjectMerge merge_info;
-        merge_info.match = match;
-        merge_info.decision = std::move(decision);
-        merge_info.merged_object = merged_object;
-
-        // 融合结果进入CCD最终物体集合。
-        result.final_ccd_objects.push_back(merged_object);
-
-        // 另存一份融合记录。
-        // cv::Mat采用引用计数，所以这里的图像数据是浅拷贝，
-        // 不会立刻复制整幅图像。
-        result.merged_info.push_back(
-            std::move(merge_info)
-        );
-
-        // 前后两个原始物体已经合并，后续遍历必须跳过。
-        used[i] = true;
-        used[best_candidate_index] = true;
     }
 
+    std::vector<bool> used(all_objects.size(), false);
+    // map中的引用保持稳定，每张原图最多重新处理一次。
+    std::map<std::size_t, CcdRecoveryFrame> recovery_cache;
+
+    for (std::size_t i = 0; i < all_objects.size(); ++i) {
+        showProgress("CCD temporal", i, all_objects.size());
+        if (used[i]) continue;
+        const auto& object = all_objects[i];
+        const auto& info = object.object_info;
+        if (info.position == CcdObjectPosition::Interior) {
+            result.final_ccd_objects.push_back(object);
+            used[i] = true;
+            continue;
+        }
+
+        const bool bottom = info.position == CcdObjectPosition::BottomBoundary;
+        const CcdObjectCrop* previous = bottom ? &object : nullptr;
+        const CcdObjectCrop* current = bottom ? nullptr : &object;
+        std::optional<std::size_t> previous_index = bottom
+            ? std::optional<std::size_t>(i) : std::nullopt;
+        std::optional<std::size_t> current_index = bottom
+            ? std::nullopt : std::optional<std::size_t>(i);
+        double best_overlap = -1.0;
+
+        // 优先沿用原列表中的正常匹配，只有失败时才回查。
+        if (bottom) {
+            for (std::size_t j = i + 1; j < all_objects.size(); ++j) {
+                const auto& candidate = all_objects[j];
+                if (candidate.object_info.file_index > info.file_index + 1) break;
+                if (used[j] || !isCrossFrameCandidate(object, candidate, options)) continue;
+                const double overlap = calculateHorizontalOverlap(
+                    info.bounding_rect, candidate.object_info.bounding_rect);
+                if (overlap > best_overlap) {
+                    best_overlap = overlap;
+                    current = &candidate;
+                    current_index = j;
+                }
+            }
+        }
+
+        CcdRecoveryFrame* recovered_frame = nullptr;
+        std::size_t recovered_index = 0;
+        if ((!previous || !current) &&
+            ((bottom && info.file_index < pairs.size()) ||
+             (!bottom && info.file_index > 1))) {
+            const std::size_t adjacent_index = bottom
+                ? info.file_index + 1 : info.file_index - 1;
+            const auto& pair = pairs[adjacent_index - 1];
+            const auto adjacent_time = parseCcdTimestampMs(pair.id);
+            const auto time_gap = bottom
+                ? adjacent_time - info.timestamp_ms : info.timestamp_ms - adjacent_time;
+            // 先确认时间连续，避免对不可能匹配的帧重新分割。
+            if (time_gap > 0 && time_gap <= options.max_frame_gap_ms) {
+                auto entry = recovery_cache.find(adjacent_index);
+                if (entry == recovery_cache.end()) {
+                    entry = recovery_cache.emplace(adjacent_index,
+                        reprocessCcdBoundaryFrame(adjacent_index, pair, background, ccd_options)).first;
+                }
+                auto& recovery = entry->second;
+                for (std::size_t k = 0; k < recovery.objects.size(); ++k) {
+                    if (recovery.used[k]) continue;
+                    const auto& candidate = recovery.objects[k];
+                    const bool matches = bottom
+                        ? isCrossFrameCandidate(object, candidate, options)
+                        : isCrossFrameCandidate(candidate, object, options);
+                    if (!matches) continue;
+                    const double overlap = calculateHorizontalOverlap(
+                        info.bounding_rect, candidate.object_info.bounding_rect);
+                    if (overlap > best_overlap) {
+                        best_overlap = overlap;
+                        recovered_frame = &recovery;
+                        recovered_index = k;
+                        if (bottom) current = &candidate;
+                        else previous = &candidate;
+                    }
+                }
+            }
+        }
+
+        if (!previous || !current) {
+            result.final_ccd_objects.push_back(object);
+            result.unmatched_boundary_objects.push_back(object);
+            used[i] = true;
+            continue;
+        }
+
+        // 无论哪侧来自回查，都按拍摄时间顺序复用现有评分和融合函数。
+        auto decision = estimateCcdFusion(*previous, *current, options);
+        auto merged_object = decision.mode == CcdFusionMode::RedundancyFusion
+            ? fuseCcdRedundantRegion(*previous, *current, decision.best_overlap_rows, options)
+            : concatenateCcdObjects(*previous, *current, options);
+
+        CcdObjectMerge merge_info;
+        merge_info.match.previous_index = previous_index;
+        merge_info.match.current_index = current_index;
+        merge_info.match.previous_info = previous->object_info;
+        merge_info.match.current_info = current->object_info;
+        merge_info.match.previous_recovered = !previous_index.has_value();
+        merge_info.match.current_recovered = !current_index.has_value();
+        merge_info.match.time_gap_ms = current->object_info.timestamp_ms - previous->object_info.timestamp_ms;
+        merge_info.match.horizontal_overlap = best_overlap;
+        merge_info.decision = std::move(decision);
+        merge_info.merged_object = merged_object;
+        result.final_ccd_objects.push_back(merged_object);
+        result.merged_info.push_back(std::move(merge_info));
+
+        used[i] = true;
+        if (previous_index) used[*previous_index] = true;
+        if (current_index) used[*current_index] = true;
+        if (recovered_frame) {
+            recovered_frame->used[recovered_index] = true;
+            ++result.recovered_fragment_count;
+        }
+    }
+
+    result.reprocessed_frame_count = recovery_cache.size();
     showProgress("CCD temporal", all_objects.size(), all_objects.size());
     return result;
 }

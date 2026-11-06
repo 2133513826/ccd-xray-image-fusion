@@ -107,6 +107,8 @@ cv::Mat detectCcd(const cv::Mat& depth, const cv::Mat& intensity,
 //形态学处理，去除噪声
     auto kernel=cv::getStructuringElement(cv::MORPH_ELLIPSE,{p.kernel,p.kernel});
 
+    // 先移除零散噪声，再连接目标中的小间隙。
+    cv::morphologyEx(mask,mask,cv::MORPH_OPEN,kernel);
     cv::morphologyEx(mask,mask,cv::MORPH_CLOSE,kernel);
     cv::bitwise_and(mask,b.field,mask);
 

@@ -3,6 +3,34 @@
 #include<opencv2/imgproc.hpp>
 
 #include<stdexcept>
+#include <algorithm>
+#include <cctype>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+
+std::int64_t parseCcdTimestampMs(const std::string& id) {
+    if (id.size() != 17 || !std::all_of(id.begin(), id.end(),
+        [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        throw std::invalid_argument("Invalid CCD timestamp: " + id);
+    }
+
+    std::tm time{};
+    time.tm_isdst = -1;
+    std::istringstream input(id.substr(0, 14));
+    input >> std::get_time(&time, "%Y%m%d%H%M%S");
+    if (input.fail()) {
+        throw std::invalid_argument("Invalid CCD timestamp: " + id);
+    }
+    const std::time_t seconds = std::mktime(&time);
+    std::ostringstream normalized;
+    normalized << std::put_time(&time, "%Y%m%d%H%M%S");
+    if (seconds == -1 || normalized.str() != id.substr(0, 14)) {
+        throw std::invalid_argument("Invalid CCD date: " + id);
+    }
+    return static_cast<std::int64_t>(seconds) * 1000 +
+           std::stoi(id.substr(14, 3));
+}
 
 //分析一帧ccd的信息
 CcdFrameAnalysis analyzeCcdMask(

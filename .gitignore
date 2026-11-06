@@ -1,4 +1,5 @@
 /build/
+/build-*/
 /data/
 /results/
 
@@ -7,3 +8,8 @@
 /tests/**/*.tif
 /tests/**/*.jpg
 /tests/**/*.png
+
+# Local notes and generated test output.
+/tests/*.txt
+/export_test_output/
+/registration_config_test_data/

@@ -370,6 +370,7 @@ int main(int argc, char* argv[]) {
 #include "ccd/ccd_allmediaprocess.hpp"  // CCD单帧处理。
 #include "ccd/ccd_temporal.hpp"         // CCD连续帧处理。
 #include "x/x_objects.hpp"              // X光物体提取。
+#include "io/result_export.hpp"
 
 // OpenCV：图像转换、缩放、窗口显示和键盘输入。
 #include <opencv2/opencv.hpp>
@@ -382,8 +383,9 @@ int main(int argc, char* argv[]) {
 #include <cstddef>    // std::size_t。
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: image_fusion <config_file>\n";
+    if (argc < 2 || argc > 3 ||
+        (argc == 3 && std::string(argv[2]) != "--export-only")) {
+        std::cerr << "Usage: image_fusion <config_file> [--export-only]\n";
         return 1;
     }
     try {
@@ -398,14 +400,46 @@ int main(int argc, char* argv[]) {
         const auto single = ccd_allmediaprocess(pairs, background, config.ccd_options);
         CcdTemporalOptions temporal;
         temporal.invalid_depth = config.ccd_options.invalid_depth;
-        const auto result = processCcdTemporalObjects(single, temporal);
+        const auto result = processCcdTemporalObjects(
+            single, pairs, background, config.ccd_options, temporal);
         const auto& ccd = result.final_ccd_objects;
+        std::cout << "CCD recovery: frames=" << result.reprocessed_frame_count
+                  << ", fragments=" << result.recovered_fragment_count
+                  << ", unmatched boundaries=" << result.unmatched_boundary_objects.size() << '\n';
+        for (const auto& merge : result.merged_info) {
+            const auto& match = merge.match;
+            if (!match.previous_recovered && !match.current_recovered) continue;
+            std::cout << "Recovered CCD pair: frame=" << match.previous_info.file_index
+                      << " -> " << match.current_info.file_index
+                      << ", area=" << match.previous_info.area << "/" << match.current_info.area
+                      << ", gap=" << match.time_gap_ms << "ms"
+                      << ", overlap=" << merge.decision.best_overlap_rows << '\n';
+        }
+
+        // 输出列表中的Mat与记录共享数据，可据此给预览加上诊断状态。
+        std::vector<std::string> ccd_status(ccd.size());
+        for (std::size_t i = 0; i < ccd.size(); ++i) {
+            for (const auto& object : result.unmatched_boundary_objects) {
+                if (ccd[i].mask.data == object.mask.data) ccd_status[i] = " | Unmatched boundary";
+            }
+            for (const auto& merge : result.merged_info) {
+                if (ccd[i].mask.data == merge.merged_object.mask.data &&
+                    (merge.match.previous_recovered || merge.match.current_recovered)) {
+                    ccd_status[i] = " | Recovered fragment";
+                }
+            }
+        }
 
         // X：读取、分组、选择每个物体的最大面积观测。
         const auto data = loadXrayData(config.x_high_dir, config.x_options);
         const auto xray = processXrayObjects(data, config.x_options);
         if (ccd.empty() || xray.empty())
             throw std::runtime_error("No final CCD or X-ray objects");
+
+        const auto exported = exportObjectResults(config.output_dir, result, xray);
+        std::cout << "CCD exported: " << ccd.size() << " objects -> " << exported.ccd.string()
+                  << "\nX-ray exported: " << xray.size() << " objects -> " << exported.xray.string() << '\n';
+        if (argc == 3) return 0;
 
         // 将物体图像和mask并排放入固定大小的画布。
 auto preview = [](const cv::Mat& source, const cv::Mat& mask) {
@@ -468,7 +502,7 @@ auto preview = [](const cv::Mat& source, const cv::Mat& mask) {
 cv::imshow("X-ray", preview(xray[xi].high, xray[xi].mask));
             cv::setWindowTitle("CCD", "CCD " + std::to_string(ci+1) + "/" +
                 std::to_string(ccd.size()) + " | " +
-                std::to_string(ccd[ci].object_info.timestamp_ms));
+                std::to_string(ccd[ci].object_info.timestamp_ms) + ccd_status[ci]);
             cv::setWindowTitle("X-ray", "X " + std::to_string(xray[xi].object_id) + "/" +
                 std::to_string(xray.size()) + " | " +
                 std::to_string(xray[xi].timestamp_ms));

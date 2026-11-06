@@ -172,14 +172,6 @@ const double min_horizontal_iou = options.min_horizontal_iou;
             throw std::invalid_argument("Empty X-ray group");
 
         try {
-            // 每帧均只有一个目标时，整组统一使用组内编号1。
-            const bool single = std::all_of(
-                group.begin(), group.end(),
-                [](const auto& frame) {
-                    return frame.labels == 1;
-                }
-            );
-
             // best[id]保存该编号的最大面积结果；下标0不用。
             std::vector<BestObservation> best(1);
             std::vector<Detection> previous;
@@ -202,10 +194,11 @@ if (current.empty()) {
     continue;
 }
 
-                // 第一帧或单目标组从1开始编号。
-                std::size_t first_id = 1;
+                // 新目标使用未分配的编号，空帧后也不能覆盖已有物体。
+                std::size_t first_id = largest_id + 1;
 
-                if (!single && !previous.empty()) {
+                // 每帧只有一个连通域时，也必须判断是否属于上一帧的物体。
+                if (!previous.empty()) {
                     first_id = findFirstId(
                         current.front(), previous, min_horizontal_iou
                     );

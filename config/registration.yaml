@@ -1,0 +1,27 @@
+%YAML:1.0
+---
+paths:
+  results_dir: "../results"
+
+registration:
+  timestamp_bin_ms: 100
+  timestamp_search_radius: 8
+  gap_cost: 0.95
+
+  scale_search_fraction: 0.15
+  scale_search_step: 0.01
+  max_rotation_deg: 5.0
+  rotation_step_deg: 1.0
+  residual_shift_pixels: 3
+  calibration_samples: 80
+
+  review_iou: 0.50
+  low_iou: 0.30
+
+visualization:
+  # CCD pseudocolor contribution in the transparent fusion image.
+  overlay_alpha: 0.55
+  # Supported: turbo, jet, viridis, plasma, magma, inferno, hot, bone.
+  colormap: "turbo"
+  example_count: 8
+  include_review_examples: 1

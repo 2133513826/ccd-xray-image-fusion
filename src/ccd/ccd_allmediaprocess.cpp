@@ -24,17 +24,7 @@ std::vector<CcdObjectCrop> ccd_allmediaprocess(
     for (auto& CcdPair : CcdPairs)
     {
         file_index++;
-        // id格式：20251127155634931，前14位是日期时间，末3位是毫秒。
-std::tm time{};
-time.tm_isdst = -1;
-std::istringstream input(CcdPair.id.substr(0, 14));
-input >> std::get_time(&time, "%Y%m%d%H%M%S");
-if (input.fail()) throw std::runtime_error("Invalid CCD timestamp");
-const std::time_t seconds = std::mktime(&time);
-if (seconds == -1) throw std::runtime_error("Invalid CCD date");
-timestamp_ms = static_cast<std::int64_t>(seconds) * 1000
-             + std::stoi(CcdPair.id.substr(14, 3));
-        //timestamp_ms=static_cast<std::int64_t>(CcdPair.id);
+        timestamp_ms = parseCcdTimestampMs(CcdPair.id);
         //生成掩膜
         cv::Mat TemMask=detectCcd(CcdPair.depth_image,CcdPair.intensity_image,b,p);
         //存储信息

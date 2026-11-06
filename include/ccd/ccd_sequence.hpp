@@ -34,6 +34,9 @@ struct CcdFrameAnalysis
     cv::Mat labels;//连通区域标签
 };
 
+// 将CCD文件名中的17位日期时间转换为毫秒时间戳。
+std::int64_t parseCcdTimestampMs(const std::string& id);
+
 //分析一帧ccd的信息
 CcdFrameAnalysis analyzeCcdMask(
     std::size_t file_index,

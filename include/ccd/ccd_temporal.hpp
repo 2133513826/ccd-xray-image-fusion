@@ -1,9 +1,11 @@
 #pragma once
 
 #include "ccd/ccd_crop.hpp"
+#include "ccd/ccd_preprocess.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 // 连续帧关联参数
@@ -77,9 +79,13 @@ struct CcdFusionDecision {
 
 // 一组可能属于同一物体的跨帧目标
 struct CcdCrossFrameMatch {
-    // 两个下标都指向输入的 all_objects
-    std::size_t previous_index = 0;
-    std::size_t current_index = 0;
+    // 原列表目标保存下标；回查恢复的片段不在原列表中，使用nullopt。
+    std::optional<std::size_t> previous_index;
+    std::optional<std::size_t> current_index;
+    CcdObjectInfo previous_info{};
+    CcdObjectInfo current_info{};
+    bool previous_recovered = false;
+    bool current_recovered = false;
 
     std::int64_t time_gap_ms = 0;
     double horizontal_overlap = 0.0;
@@ -100,6 +106,10 @@ struct CcdTemporalResult {
     std::vector<CcdObjectCrop> final_ccd_objects;
     // 跨帧匹配结果，用于展示算法结果
     std::vector<CcdObjectMerge> merged_info;
+    // 仍未配对的边界目标也保留在final_ccd_objects，但单独标记便于排查。
+    std::vector<CcdObjectCrop> unmatched_boundary_objects;
+    std::size_t reprocessed_frame_count = 0;
+    std::size_t recovered_fragment_count = 0;
 };
 
 // 计算两个外接矩形的横向重叠率
@@ -149,5 +159,8 @@ CcdObjectCrop fuseCcdRedundantRegion(
 // 处理全部物体
 CcdTemporalResult processCcdTemporalObjects(
     const std::vector<CcdObjectCrop>& all_objects,
+    const std::vector<CcdPair>& pairs,
+    const CcdBackground& background,
+    const CcdOptions& ccd_options,
     const CcdTemporalOptions& options
 );
